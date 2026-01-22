@@ -14,26 +14,36 @@ st.set_page_config(
 # --- 2. 데이터 로드 함수 (캐싱 적용) ---
 @st.cache_data
 def load_data(file_path_or_buffer):
+    # 1. 인코딩 감지 및 읽기 시도
+    # (utf-8로 먼저 해보고, 안 되면 cp949로 읽는 방식)
     try:
-        # 기상청 데이터는 보통 상단 7줄이 메타데이터이므로 skiprows=7
-        # 탭(\t) 문자가 포함된 날짜 처리를 위해 정제 과정 필요
+        # 일단 utf-8로 시도
         df = pd.read_csv(file_path_or_buffer, skiprows=7, encoding='utf-8')
-        
-        # 컬럼명 정리 (공백 제거)
-        df.columns = df.columns.str.strip()
-        
-        # '날짜' 컬럼 전처리: 앞의 탭(\t) 제거 및 datetime 변환
-        if '날짜' in df.columns:
-            df['날짜'] = df['날짜'].astype(str).str.strip()
-            df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
-        
-        # 결측치 제거 (분석 정확도를 위해)
-        df = df.dropna(subset=['평균기온(℃)', '최저기온(℃)', '최고기온(℃)'])
-        
-        return df
-    except Exception as e:
-        st.error(f"데이터 로드 중 오류가 발생했습니다: {e}")
-        return pd.DataFrame()
+    except UnicodeDecodeError:
+        # 실패하면 cp949(윈도우 한글)로 재시도
+        # 파일 포인터를 다시 맨 앞으로 돌려야 함
+        if hasattr(file_path_or_buffer, 'seek'):
+            file_path_or_buffer.seek(0)
+        df = pd.read_csv(file_path_or_buffer, skiprows=7, encoding='cp949')
+
+    # 2. 컬럼명 정리 (공백 제거)
+    df.columns = df.columns.str.strip()
+    
+    # 3. '날짜' 컬럼 전처리: 앞의 탭(\t) 제거 및 datetime 변환
+    if '날짜' in df.columns:
+        # 데이터가 문자열이 아닌 경우를 대비해 astype(str) 사용
+        df['날짜'] = df['날짜'].astype(str).str.strip()
+        df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
+    
+    # 4. 결측치 제거 (분석 정확도를 위해)
+    # 필요한 컬럼이 다 있는지 확인 후 드롭
+    cols_to_check = ['평균기온(℃)', '최저기온(℃)', '최고기온(℃)']
+    existing_cols = [c for c in cols_to_check if c in df.columns]
+    
+    if existing_cols:
+        df = df.dropna(subset=existing_cols)
+    
+    return df
 
 # --- 3. 메인 UI 및 로직 ---
 def main():
