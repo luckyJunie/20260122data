@@ -11,17 +11,16 @@ st.set_page_config(
     layout="wide"
 )
 
-# --- 2. 데이터 로드 함수 (캐싱 적용) ---
+# --- 2. 데이터 로드 함수 (인코딩 자동 감지 및 에러 해결 적용) ---
 @st.cache_data
 def load_data(file_path_or_buffer):
     # 1. 인코딩 감지 및 읽기 시도
-    # (utf-8로 먼저 해보고, 안 되면 cp949로 읽는 방식)
+    # (기본적으로 utf-8을 시도하고, 실패하면 윈도우용 cp949로 재시도)
     try:
-        # 일단 utf-8로 시도
+        # csv 파일의 앞부분 7줄(메타데이터)을 건너뛰고 읽기
         df = pd.read_csv(file_path_or_buffer, skiprows=7, encoding='utf-8')
     except UnicodeDecodeError:
-        # 실패하면 cp949(윈도우 한글)로 재시도
-        # 파일 포인터를 다시 맨 앞으로 돌려야 함
+        # utf-8 실패 시, 파일 포인터를 처음으로 돌리고 cp949로 재시도
         if hasattr(file_path_or_buffer, 'seek'):
             file_path_or_buffer.seek(0)
         df = pd.read_csv(file_path_or_buffer, skiprows=7, encoding='cp949')
@@ -35,8 +34,7 @@ def load_data(file_path_or_buffer):
         df['날짜'] = df['날짜'].astype(str).str.strip()
         df['날짜'] = pd.to_datetime(df['날짜'], errors='coerce')
     
-    # 4. 결측치 제거 (분석 정확도를 위해)
-    # 필요한 컬럼이 다 있는지 확인 후 드롭
+    # 4. 결측치 제거 (분석 정확도를 위해 기온 데이터가 없는 행 삭제)
     cols_to_check = ['평균기온(℃)', '최저기온(℃)', '최고기온(℃)']
     existing_cols = [c for c in cols_to_check if c in df.columns]
     
@@ -53,26 +51,32 @@ def main():
     # 사이드바: 파일 업로드 및 설정
     st.sidebar.header("설정")
     
-    # 기본 파일 사용 vs 사용자 업로드
+    # 사용자 파일 업로드 기능
     uploaded_file = st.sidebar.file_uploader("새로운 기상 데이터 업로드 (CSV)", type=['csv'])
     
+    df = pd.DataFrame() # 빈 데이터프레임 초기화
+
     if uploaded_file is not None:
         df = load_data(uploaded_file)
         st.sidebar.success("업로드된 파일을 사용합니다.")
     else:
-        # 기본 파일 로드 (같은 폴더에 파일이 있어야 함)
+        # 기본 파일 로드 (같은 폴더에 있는 파일)
         default_file = 'ta_20260122174530.csv'
         try:
             df = load_data(default_file)
             st.sidebar.info("기본 탑재 데이터를 사용 중입니다.")
         except FileNotFoundError:
-            st.error("기본 데이터 파일을 찾을 수 없습니다. CSV 파일을 업로드해주세요.")
+            st.error(f"기본 데이터 파일({default_file})을 찾을 수 없습니다. CSV 파일을 업로드해주세요.")
+            return
+        except Exception as e:
+            st.error(f"데이터 로드 중 오류 발생: {e}")
             return
 
     if df.empty:
+        st.warning("데이터를 불러올 수 없습니다. 파일 형식을 확인해주세요.")
         return
 
-    # 날짜 범위 정보
+    # 날짜 범위 정보 표시
     min_date = df['날짜'].min().date()
     max_date = df['날짜'].max().date()
     
@@ -97,7 +101,7 @@ def main():
     target_avg_temp = target_row['평균기온(℃)'].values[0]
     target_year = selected_date.year
 
-    # 역사 속 '같은 날' 데이터 추출 (예: 매년 1월 21일 데이터만 모음)
+    # 역사 속 '같은 날' 데이터 추출 (예: 매년 1월 22일 데이터만 모음)
     historical_df = df[
         (df['날짜'].dt.month == selected_date.month) & 
         (df['날짜'].dt.day == selected_date.day)
@@ -122,14 +126,15 @@ def main():
             label=f"{selected_date} 평균기온", 
             value=f"{target_avg_temp}℃",
             delta=f"{diff:.1f}℃ (평년 대비)",
-            delta_color="inverse" # 높으면 빨강(더움), 낮으면 파랑(추움) 효과를 위해 역전 시도(상황에 따라 조정)
+            delta_color="inverse" # 높으면 빨강(더움), 낮으면 파랑(추움) 효과를 위해 역전 시도
         )
     with col2:
         st.metric(label="역대 같은 날 평균기온", value=f"{hist_avg_mean:.1f}℃")
     with col3:
+        # 순위 계산 (높은 순서대로 랭킹)
         rank = historical_df['평균기온(℃)'].rank(ascending=False).loc[target_row.index].values[0]
         total_years = len(historical_df)
-        st.metric(label="역대 순위 (더운 순)", value=f"{int(rank)}위 / {total_years}년 중")
+        st.metric(label="역대 더운 순위", value=f"{int(rank)}위 / {total_years}년 중")
 
     st.divider()
 
@@ -142,7 +147,8 @@ def main():
         nbins=30, 
         title=f"지난 {total_years}년 간의 {selected_date.month}월 {selected_date.day}일 기온 분포",
         color_discrete_sequence=['#bdc3c7'], # 회색 톤
-        opacity=0.7
+        opacity=0.7,
+        labels={"평균기온(℃)": "기온 (℃)"}
     )
     
     # 선택된 날짜의 위치 표시 (빨간 선)
@@ -182,12 +188,17 @@ def main():
         title=f"역대 {selected_date.month}월 {selected_date.day}일 기온 변화"
     )
     
-    # 추세선 추가 (Lowess)
-    fig_line.add_traces(
-        px.scatter(historical_df, x='날짜', y='평균기온(℃)', trendline="lowess").data[1]
-    )
+    # 추세선 추가 (Lowess 회귀선)
+    # 데이터 포인트가 충분할 때만 추세선 그리기
+    if len(historical_df) > 5:
+        try:
+            trend = px.scatter(historical_df, x='날짜', y='평균기온(℃)', trendline="lowess").data[1]
+            trend.line.color = "gray" # 추세선 색상
+            fig_line.add_traces(trend)
+        except:
+            pass # statsmodels 라이브러리가 없거나 계산 오류 시 추세선 생략
     
-    # 선 그래프 레이아웃 다듬기
+    # 그래프 레이아웃 다듬기
     fig_line.update_traces(marker=dict(size=8))
     fig_line.update_layout(showlegend=False)
     
